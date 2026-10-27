@@ -191,7 +191,7 @@ export function serialize(match) {
   };
 }
 
-export function applySnapshot(match, snap) {
+export function applySnapshot(match, snap, localId, opts) {
   if (!match) match = { players: [] };
   match.phase = snap.phase;
   match.kidsMode = snap.kidsMode;
@@ -201,12 +201,34 @@ export function applySnapshot(match, snap) {
   match.winnerId = snap.winnerId;
   match.tagCooldown = snap.tagCooldown;
   match.events = match.events || [];
+  const soft = opts && opts.softLocal;
   const byId = new Map(match.players.map((p) => [p.id, p]));
   match.players = snap.players.map((sp) => {
     const prev = byId.get(sp.id);
+    if (prev && soft && localId && sp.id === localId && prev.alive) {
+      const dx = sp.x - prev.x, dy = sp.y - prev.y;
+      const dist = Math.hypot(dx, dy);
+      // Keep predicted pose if close; hard-correct if far (desync / tag teleport)
+      if (dist < 48) {
+        Object.assign(prev, sp, { x: prev.x + dx * 0.25, y: prev.y + dy * 0.25 });
+        return prev;
+      }
+    }
     return prev
       ? Object.assign(prev, sp)
       : { ...sp, vx: 0, vy: 0 };
   });
   return match;
+}
+
+/** Client-side prediction: move only the local player (no fuse/tag authority). */
+export function predictMove(match, localId, dx, dy, dt) {
+  if (!match || match.phase !== 'play') return;
+  applyInput(match, localId, dx, dy);
+  const p = match.players.find((pl) => pl.id === localId);
+  if (!p || !p.alive) return;
+  const nx = p.x + p.vx * SPEED * dt;
+  const ny = p.y + p.vy * SPEED * dt;
+  const pos = resolvePos(nx, ny);
+  p.x = pos.x; p.y = pos.y;
 }

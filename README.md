@@ -4,7 +4,7 @@ A mobile-first **hot-potato chase** party game. One player holds the Boom. They 
 
 **Not** Among Us, **not** Pictionary, **no** voting — just chase and tag.
 
-Play (once published): https://mati-sme.github.io/pass-the-boom/
+Play: https://mati-sme.github.io/pass-the-boom/
 
 ## How to play
 
@@ -23,60 +23,58 @@ Ages: designed for mixed groups (about 4yo–teens). Big tap targets, clear Boom
 Static files only — no build step.
 
 ```bash
-cd /workspace/projects/pass-the-boom   # or your clone
+cd /workspace/projects/pass-the-boom
 python3 -m http.server 8080
 ```
 
-Open `http://localhost:8080` in two tabs. (ES modules need a real origin, so don’t open `index.html` as a `file://` URL.)
+Open `http://localhost:8080` in two tabs. For multiplayer you need the PartyKit server running (see below) or a deployed host in `js/config.js`.
+
+Override host for local PartyKit: `http://localhost:8080/?pk=localhost:1999`
 
 ## Publish to GitHub Pages
 
-```bash
-# from this folder, after creating the empty repo mati-sme/pass-the-boom
-git init
-git add .
-git commit -m "Initial Pass the Boom scaffold"
-git branch -M main
-git remote add origin https://github.com/mati-sme/pass-the-boom.git
-git push -u origin main
-gh api -X PUT repos/mati-sme/pass-the-boom/pages -f build_type=workflow 2>/dev/null || true
-# Or: GitHub → Settings → Pages → Source: Deploy from branch → main / (root)
-```
+Push to `mati-sme/pass-the-boom` main. After each content change, bump `CACHE` in `sw.js` (currently `pass-the-boom-v2`).
 
 Live URL: `https://mati-sme.github.io/pass-the-boom/`
 
-After each content change, bump `CACHE` in `sw.js` (e.g. `pass-the-boom-v2`) so phones pick up the new files.
-
-## Networking (v1)
+## Networking (v2 — PartyKit)
 
 | Piece | Choice |
 | --- | --- |
-| Transport | **WebRTC data channels** via [PeerJS](https://peerjs.com/) |
-| CDN | `https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js` (loaded from `index.html`) |
-| Signaling | Free public PeerServer `0.peerjs.com` (host/port/path set in `js/net.js`) |
-| Authority | **Host phone** owns fuse, Boom holder, who’s out, and broadcasts snapshots ~20 Hz |
-| Room codes | Host registers Peer id `ptb-XXXX`. Joiners connect to that id. |
+| Transport | WebSocket to PartyKit (Cloudflare Durable Object) |
+| Authority | **Server** runs fuse / Boom / tags at ~20 Hz — no phone is the host brain |
+| Client feel | Local movement prediction + soft reconcile |
+| Room codes | Still 4 letters; room id `ptb-XXXX` |
+| Host role | Lobby leader only (Kids Mode + Start / Play again) |
 
-### Caveats
+Server project: `/workspace/projects/party-games-server/` (shared with Quiet Courier).
 
-- The **free PeerJS cloud** is a public signaling service. It can be rate-limited or briefly down. Peers still need working STUN/WebRTC on the local network or internet; some strict carrier NATs may fail.
-- **Fallback:** run your own PeerServer (`npm i -g peer`) or point `peerOpts()` in `js/net.js` at another free host (e.g. a self-hosted `peerjs-server` on Fly/Render). Document the new `host` / `port` / `path` / `secure` values there.
-- Host must **keep the tab open** — if the host leaves, the room dies (clients get “Host disconnected”).
-- No accounts, no backend of our own for v1.
+Set `PARTYKIT_HOST_DEFAULT` in `js/config.js` after `npx partykit deploy`. Until then Create/Join shows a clear “server not deployed” error.
+
+### Deploy server (one-time)
+
+```bash
+cd ../party-games-server
+npm install
+npx partykit login   # browser device-code login
+npx partykit deploy
+# → https://party-games.<user>.partykit.dev
+# put that host (no https://) into js/config.js
+```
 
 ## Files
 
 - `index.html` — screens (home, join, lobby, play, win)
 - `style.css` — mobile-first UI
-- `js/main.js` — lobby + loop glue
-- `js/net.js` — PeerJS room create/join
-- `js/game.js` — authoritative sim (movement, tag, fuse, explode)
+- `js/config.js` — PartyKit host
+- `js/main.js` — lobby + client loop + prediction
+- `js/net.js` — WebSocket room create/join
+- `js/game.js` — sim helpers + serialize / predict
 - `js/input.js` — floating joystick + keyboard
 - `js/render.js` — canvas arena
-- `js/audio.js` — WebAudio tick / pass / soft boom / win (no audio files)
-- `sw.js` — cache-first PWA shell (bump `CACHE` each release)
-- `manifest.webmanifest` — installable shortcut
+- `js/audio.js` — WebAudio SFX
+- `sw.js` — PWA shell (`pass-the-boom-v2`)
 
 ## License
 
-Made for Matias’s party-game shelf. Hand-written scaffold; no paid APIs, no generated image assets.
+Made for Matias’s party-game shelf. Hand-written; no paid APIs.

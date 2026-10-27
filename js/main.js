@@ -1,10 +1,10 @@
 /**
- * Pass the Boom — app bootstrap, lobby, host sim loop, client mirror.
+ * Pass the Boom — lobby + client loop. Authority lives on PartyKit.
  */
 'use strict';
 
 import { NetRoom } from './net.js';
-import { createMatch, applyInput, step, serialize, applySnapshot } from './game.js';
+import { applySnapshot, predictMove } from './game.js';
 import { bindInput, getMove, resetInput } from './input.js';
 import { bindCanvas, draw } from './render.js';
 import { unlockAudio, SFX } from './audio.js';
@@ -26,6 +26,7 @@ let lastTs = 0;
 let toastTimer = 0;
 let lastFuseBucket = -1;
 let kidsMode = false;
+let inputAcc = 0;
 
 function show(name) {
   for (const [k, el] of Object.entries(screens)) {
@@ -65,18 +66,14 @@ function renderLobby(players, isHost, code) {
   const ul = $('playerList');
   ul.innerHTML = '';
   const localId = room && room.localId;
+  const colors = ['#5b8cff', '#5dff8a', '#ff6b9d', '#ffd84a', '#b07cff', '#5de0ff', '#ff9a5b', '#e0e0e0'];
   for (const p of players) {
     const li = document.createElement('li');
     if (p.id === localId) li.classList.add('you');
     li.innerHTML =
-      `<span class="dot" style="background:${p.color || '#888'}"></span>` +
+      `<span class="dot" style="background:${colors[players.indexOf(p) % colors.length]}"></span>` +
       `<span>${escapeHtml(p.name)}${p.id === localId ? ' (you)' : ''}</span>` +
       (p.isHost ? '<span class="host-tag">Host</span>' : '');
-    // assign display color from index if missing
-    if (!p.color) {
-      const colors = ['#5b8cff', '#5dff8a', '#ff6b9d', '#ffd84a', '#b07cff', '#5de0ff', '#ff9a5b', '#e0e0e0'];
-      li.querySelector('.dot').style.background = colors[players.indexOf(p) % colors.length];
-    }
     ul.appendChild(li);
   }
   $('kidsWrap').classList.toggle('hidden', !isHost);
@@ -107,7 +104,6 @@ function updateHud() {
   const alive = match.players.filter((p) => p.alive).length;
   $('aliveTxt').textContent = String(alive);
 
-  // tick SFX urgency
   if (match.phase === 'play' && match.boomId) {
     const urgency = 1 - pct;
     const bucket = Math.floor(match.fuse * (urgency > 0.65 ? 4 : 2));
@@ -119,7 +115,7 @@ function updateHud() {
 }
 
 function handleEvents(events) {
-  for (const ev of events) {
+  for (const ev of events || []) {
     if (ev.type === 'pass') {
       SFX.pass();
       const me = room && room.localId;
@@ -146,10 +142,7 @@ function endMatch() {
 function startMatchFromLobby() {
   if (!room || room.role !== 'host') return;
   kidsMode = $('kidsMode').checked;
-  const roster = room.players.map((p) => ({ id: p.id, name: p.name }));
-  match = createMatch(roster, kidsMode);
-  room.broadcast({ type: 'start', kidsMode, snapshot: serialize(match) });
-  enterPlay();
+  room.send({ type: 'start', kidsMode });
 }
 
 function enterPlay() {
@@ -157,7 +150,7 @@ function enterPlay() {
   resetInput();
   lastTs = 0;
   lastFuseBucket = -1;
-  // force canvas resize after becoming visible
+  inputAcc = 0;
   requestAnimationFrame(() => {
     window.dispatchEvent(new Event('resize'));
     startLoop();
@@ -175,21 +168,15 @@ function startLoop() {
     if (dt > 0.05) dt = 0.05;
 
     const move = getMove();
-    if (room && room.role === 'host' && match && match.phase === 'play') {
-      applyInput(match, room.localId, move.dx, move.dy);
-      const wasPlay = match.phase === 'play';
-      const events = step(match, dt);
-      handleEvents(events);
-      // broadcast ~20 Hz (and immediately on phase change)
-      if (!tick._acc) tick._acc = 0;
-      tick._acc += dt;
-      const phaseChanged = wasPlay && match.phase !== 'play';
-      if (tick._acc >= 0.05 || phaseChanged) {
-        tick._acc = 0;
-        room.broadcast({ type: 'state', snapshot: serialize(match) });
+    if (room && match && match.phase === 'play') {
+      // Local prediction for snappy feel
+      predictMove(match, room.localId, move.dx, move.dy, dt);
+      // Throttle input to server ~20 Hz
+      inputAcc += dt;
+      if (inputAcc >= 0.05) {
+        inputAcc = 0;
+        room.send({ type: 'input', dx: move.dx, dy: move.dy });
       }
-    } else if (room && room.role === 'client') {
-      room.sendToHost({ type: 'input', id: room.localId, dx: move.dx, dy: move.dy });
     }
 
     draw(match, room && room.localId, ts);
@@ -205,50 +192,54 @@ function stopLoop() {
 }
 
 function onNetMessage(msg) {
-  if (msg.type === 'input' && room.role === 'host' && match) {
-    applyInput(match, msg.id, msg.dx || 0, msg.dy || 0);
-  } else if (msg.type === 'start' && room.role === 'client') {
+  if (msg.type === 'start') {
     kidsMode = !!msg.kidsMode;
     match = applySnapshot(null, msg.snapshot);
     enterPlay();
-  } else if (msg.type === 'state' && room.role === 'client') {
+  } else if (msg.type === 'state') {
     const prevBoom = match && match.boomId;
     const prevAlive = match && match.players.map((p) => p.alive + ':' + p.id).join(',');
-    match = applySnapshot(match, msg.snapshot);
-    // infer local events from deltas
-    if (prevBoom && match.boomId && prevBoom !== match.boomId) {
-      const holder = match.players.find((p) => p.id === match.boomId);
-      handleEvents([{ type: 'pass', id: match.boomId, name: holder ? holder.name : '?' }]);
-    }
-    if (prevAlive) {
-      for (const p of match.players) {
-        if (!p.alive && prevAlive.includes('true:' + p.id)) {
-          handleEvents([{ type: 'boom', id: p.id, name: p.name }]);
+    match = applySnapshot(match, msg.snapshot, room && room.localId, { softLocal: true });
+    if (msg.events && msg.events.length) {
+      handleEvents(msg.events);
+    } else {
+      // Infer from deltas if server omitted events
+      if (prevBoom && match.boomId && prevBoom !== match.boomId) {
+        const holder = match.players.find((p) => p.id === match.boomId);
+        handleEvents([{ type: 'pass', id: match.boomId, name: holder ? holder.name : '?' }]);
+      }
+      if (prevAlive) {
+        for (const p of match.players) {
+          if (!p.alive && prevAlive.includes('true:' + p.id)) {
+            handleEvents([{ type: 'boom', id: p.id, name: p.name }]);
+          }
         }
       }
     }
     if (match.phase === 'win') endMatch();
-  } else if (msg.type === 'again' && room.role === 'client') {
-    // host restarted lobby
+  } else if (msg.type === 'again') {
     match = null;
     stopLoop();
     show('lobby');
+    if (room) renderLobby(room.players, room.role === 'host', room.code);
+  } else if (msg.type === 'error') {
+    toast(escapeHtml(msg.message || 'Error'), 'boom', 2200);
   }
 }
 
 function wireRoom(r) {
   room = r;
   r.onLobby = (players, isHost, code) => {
-    // paint colors onto lobby list via index
     players.forEach((p, i) => {
       const colors = ['#5b8cff', '#5dff8a', '#ff6b9d', '#ffd84a', '#b07cff', '#5de0ff', '#ff9a5b', '#e0e0e0'];
       p.color = colors[i % colors.length];
     });
     renderLobby(players, isHost, code);
+    if ($('kidsMode')) $('kidsMode').checked = !!r.kidsMode;
     SFX.join();
   };
   r.onMessage = onNetMessage;
-  r.onStatus = (s) => { /* optional */ console.log('[net]', s); };
+  r.onStatus = (s) => { console.log('[net]', s); };
   r.onFatal = (err) => {
     overlay(false);
     alert(err);
@@ -305,12 +296,10 @@ function playAgain() {
   match = null;
   stopLoop();
   if (room.role === 'host') {
-    room.broadcast({ type: 'again' });
-    show('lobby');
-    renderLobby(room.players, true, room.code);
-  } else {
-    show('lobby');
+    room.send({ type: 'again' });
   }
+  show('lobby');
+  renderLobby(room.players, room.role === 'host', room.code);
 }
 
 function boot() {
@@ -327,9 +316,11 @@ function boot() {
   $('btnLeave').onclick = () => { SFX.click(); leaveToHome(); };
   $('btnAgain').onclick = playAgain;
   $('btnHome').onclick = () => { SFX.click(); leaveToHome(); };
-  $('kidsMode').onchange = () => { kidsMode = $('kidsMode').checked; };
+  $('kidsMode').onchange = () => {
+    kidsMode = $('kidsMode').checked;
+    if (room && room.role === 'host') room.send({ type: 'kids', kidsMode });
+  };
 
-  // unlock audio on first gesture
   const unlock = () => { unlockAudio(); window.removeEventListener('pointerdown', unlock); };
   window.addEventListener('pointerdown', unlock);
 

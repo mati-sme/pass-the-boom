@@ -1,6 +1,6 @@
 /* Pass the Boom service worker — bump CACHE on every release. */
 'use strict';
-const CACHE = 'pass-the-boom-v1';
+const CACHE = 'pass-the-boom-v2';
 const ASSETS = [
   './',
   'index.html',
